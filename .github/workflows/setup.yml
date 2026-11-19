@@ -201,7 +201,11 @@ jobs:
           EOF
 
           git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add .
-          git commit -m "Auto-generated all mod files"
-          git push
+git config --local user.name "GitHub Action"
+git add .
+if ! git diff --cached --quiet; then
+  git commit -m "Auto-generated all mod files"
+  git push
+else
+  echo "Файлы уже созданы, пропускаем коммит."
+fi
