@@ -1,0 +1,207 @@
+name: Auto Setup Mod
+on: [push, workflow_dispatch]
+
+jobs:
+  create-files:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate all files
+        run: |
+          mkdir -p src/main/java/com/swillway/pronegif/net src/main/java/com/swillway/pronegif/client src/main/resources/assets/pronegif/lang gradle/wrapper
+          
+          cat << 'EOF' > build.gradle
+          plugins { id 'fabric-loom' version '1.9-SNAPSHOT' }
+          version = project.mod_version
+          group = project.maven_group
+          base { archivesName = project.archives_base_name }
+          repositories {}
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+          processResources { inputs.property "version", project.version; filesMatching("fabric.mod.json") { expand "version": project.version } }
+          tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
+          java { withSourcesJar(); sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+          minecraft_version=26.3
+          yarn_mappings=26.3+build.1
+          loader_version=0.16.9
+          fabric_version=0.110.0+26.3
+          mod_version=1.0.0
+          maven_group=com.swillway
+          archives_base_name=pronegif
+          EOF
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
+
+          cat << 'EOF' > gradle/wrapper/gradle-wrapper.properties
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.10-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+          cat << 'EOF' > src/main/resources/fabric.mod.json
+          {
+            "schemaVersion": 1, "id": "pronegif", "version": "${version}", "name": "ProneGif",
+            "description": "Prone and GIF hand.",
+            "authors": ["Swill Way"], "license": "MIT", "environment": "*",
+            "entrypoints": { "main": ["com.swillway.pronegif.ProneGifMod"], "client": ["com.swillway.pronegif.client.ProneGifClient"] },
+            "mixins": ["pronegif.mixins.json"],
+            "depends": { "fabricloader": ">=0.16.9", "fabric-api": "*", "minecraft": "~26.3", "java": ">=21" }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/resources/pronegif.mixins.json
+          { "required": true, "package": "com.swillway.pronegif.mixin", "compatibilityLevel": "JAVA_21", "mixins": [], "client": [], "injectors": { "defaultRequire": 1 } }
+          EOF
+
+          cat << 'EOF' > src/main/resources/assets/pronegif/lang/en_us.json
+          { "pronegif.toggle": "Prone toggled" }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/ProneGifMod.java
+          package com.swillway.pronegif;
+          import com.swillway.pronegif.net.ModNetworking;
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.event.player.UseEntityCallback;
+          import net.minecraft.world.InteractionResult;
+          import org.slf4j.Logger;
+          import org.slf4j.LoggerFactory;
+          public class ProneGifMod implements ModInitializer {
+              public static final String MOD_ID = "pronegif";public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+              @Override
+              public void onInitialize() {
+                  ModNetworking.registerServer();
+                  UseEntityCallback.EVENT.register((player, world, hand, entity, hitResult) -> {
+                      if (world.isClientSide() || player.isSpectator()) return InteractionResult.PASS;
+                      boolean newState = !ProneManager.isProne(entity);
+                      ProneManager.setProne(entity, newState);
+                      ModNetworking.sendProneState(entity, newState);
+                      return InteractionResult.SUCCESS;
+                  });
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/ProneManager.java
+          package com.swillway.pronegif;
+          import net.minecraft.world.entity.Entity;
+          import java.util.HashMap;
+          import java.util.Map;
+          import java.util.UUID;
+          public class ProneManager {
+              private static final Map<UUID, Boolean> PRONE = new HashMap<>();
+              public static boolean isProne(Entity entity) { return PRONE.getOrDefault(entity.getUUID(), false); }
+              public static void setProne(Entity entity, boolean value) { PRONE.put(entity.getUUID(), value); }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/net/ProneStatePayload.java
+          package com.swillway.pronegif.net;
+          import net.minecraft.network.RegistryFriendlyByteBuf;
+          import net.minecraft.network.codec.StreamCodec;
+          import net.minecraft.network.codec.ByteBufCodecs;
+          import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+          import net.minecraft.resources.ResourceLocation;
+          import com.swillway.pronegif.ProneGifMod;
+          public record ProneStatePayload(int entityId, boolean prone) implements CustomPacketPayload {
+              public static final Type<ProneStatePayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath(ProneGifMod.MOD_ID, "prone_state"));
+              public static final StreamCodec<RegistryFriendlyByteBuf, ProneStatePayload> CODEC = StreamCodec.composite(
+                      ByteBufCodecs.VAR_INT, ProneStatePayload::entityId, ByteBufCodecs.BOOL, ProneStatePayload::prone, ProneStatePayload::new);
+              @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/net/ModNetworking.java
+          package com.swillway.pronegif.net;
+          import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+          import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+          import net.minecraft.server.level.ServerPlayer;
+          import net.minecraft.world.entity.Entity;
+          public class ModNetworking {
+              public static void registerServer() { PayloadTypeRegistry.playS2C().register(ProneStatePayload.TYPE, ProneStatePayload.CODEC); }
+              public static void sendProneState(Entity entity, boolean prone) {
+                  var payload = new ProneStatePayload(entity.getId(), prone);
+                  for (ServerPlayer p : entity.level().getServer().getPlayerList().getPlayers()) ServerPlayNetworking.send(p, payload);
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/client/ProneGifClient.java
+          package com.swillway.pronegif.client;
+          import com.swillway.pronegif.net.ProneStatePayload;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+          import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+          public class ProneGifClient implements ClientModInitializer {
+              @Override
+              public void onInitializeClient() {ClientPlayNetworking.registerGlobalReceiver(ProneStatePayload.TYPE, (payload, context) -> context.client().execute(() -> GifRenderer.setProne(payload.entityId(), payload.prone())));
+                  WorldRenderEvents.AFTER_ENTITIES.register(GifRenderer::render);
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/client/GifFrames.java
+          package com.swillway.pronegif.client;
+          import net.minecraft.resources.ResourceLocation;
+          import com.swillway.pronegif.ProneGifMod;
+          public class GifFrames {
+              private static final ResourceLocation[] FRAMES = new ResourceLocation[] {
+                      ResourceLocation.fromNamespaceAndPath(ProneGifMod.MOD_ID, "textures/gif/hand/frame_0.png")
+              };
+              public static ResourceLocation getFrame(int tick) { return FRAMES[0]; }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/swillway/pronegif/client/GifRenderer.java
+          package com.swillway.pronegif.client;
+          import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
+          import net.minecraft.client.Minecraft;
+          import net.minecraft.world.entity.Entity;
+          import java.util.HashMap;
+          import java.util.Map;
+          public class GifRenderer {
+              private static final Map<Integer, Boolean> PRONE = new HashMap<>();
+              public static void setProne(int entityId, boolean prone) { PRONE.put(entityId, prone); }
+              public static void render(WorldRenderContext context) {
+                  var client = Minecraft.getInstance();
+                  if (client.level == null) return;
+                  for (var entry : PRONE.entrySet()) {
+                      if (!entry.getValue()) continue;
+                      Entity entity = client.level.getEntity(entry.getKey());
+                      if (entity == null) continue;
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > README.md
+          # ProneGif (Fabric 26.3)
+          ПКМ по сущности пригибает её.
+          EOF
+
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .
+          git commit -m "Auto-generated all mod files"
+          git push
